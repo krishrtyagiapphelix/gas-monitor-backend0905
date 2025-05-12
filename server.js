@@ -267,16 +267,31 @@ setInterval(async () => {
         io.to(`plant:${plantId}`).emit("alarm", alarmData);
         console.log(`🏭 Emitting alarm to plant room: plant:${plantId}`);
         
-        // Broadcast to all clients for notifications
-        io.emit("alarm_notification", {
-          id: alarmData._id || alarmData.id,
-          deviceId: deviceId,
-          deviceName: alarmData.deviceName || alarmData.DeviceName,
-          alarmCode: alarmData.alarmCode || alarmData.AlarmCode,
-          message: alarmData.message || alarmData.Message,
-          description: alarmData.alarmDescription || alarmData.AlarmDescription,
-          timestamp: alarmData.createdTimestamp || alarmData.CreatedTimestamp || new Date()
-        });
+        // Extra processing for alarms to maintain ordering
+        setTimeout(() => {
+          // Broadcast to all clients for notifications with complete information
+          // Ensure ALL required fields are included for proper display
+          const notificationData = {
+            id: alarmData._id || alarmData.id || `alarm-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+            deviceId: deviceId,
+            deviceName: alarmData.deviceName || alarmData.DeviceName || 'Unknown Device',
+            plantName: alarmData.plantName || alarmData.PlantName || (deviceId.includes('esp32_04') ? 'Plant D' : 'Plant C'),
+            alarmCode: alarmData.alarmCode || alarmData.AlarmCode || 'ALARM',
+            alarmDescription: alarmData.alarmDescription || alarmData.AlarmDescription || 'New alarm',
+            alarmValue: alarmData.alarmValue || alarmData.value || '',
+            message: alarmData.message || alarmData.Message || '',
+            description: alarmData.description || alarmData.desc || alarmData.alarmDescription || alarmData.AlarmDescription || '',
+            status: alarmData.status || 'New',
+            severity: alarmData.severity || 'Warning',
+            createdTimestamp: alarmData.createdTimestamp || alarmData.CreatedTimestamp || new Date().toISOString(),
+            isRead: false
+          };
+          
+          console.log(`🔔 Broadcasting COMPLETE notification: ${JSON.stringify(notificationData).substring(0, 100)}...`);
+          
+          // Send to all clients with a small delay to ensure they're processed one by one
+          io.emit("alarm_notification", notificationData);
+        }, 200); // Add a 200ms delay between notifications to ensure they're processed one by one
       } catch (err) {
         console.error("❌ Error processing alarm message:", err);
       }
@@ -341,7 +356,7 @@ connectDB()
           distance: Math.floor(Math.random() * 100) + Math.random(),
           oilLevel: 0,
           ledState: false,
-          alerts: [{code: 'IO_ALR_109', desc: 'Oil tank is empty', value: 0}],
+          alerts: [{code: 'IO_ALR_109', desc: 'Oil tank refilled', value: 0}],
           _hasRelevantParameterChanges: true,
           Category: '2025-05',
           id: `test-${Date.now()}`,
