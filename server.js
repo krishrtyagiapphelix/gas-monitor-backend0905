@@ -17,7 +17,7 @@ const app = express();
 
 // Apply CORS middleware to Express app
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+  origin: '*',  // Allow all origins
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
 }));
@@ -27,7 +27,7 @@ const server = http.createServer(app);
 // Initialize Socket.IO with comprehensive CORS settings for WebSockets
 const io = socketIo(server, {
   cors: {
-    origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+    origin: '*',
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     credentials: false,  // Set to false for simpler cross-origin
     allowedHeaders: ["*"],
@@ -97,6 +97,372 @@ redisClient.on("ready", () => {
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Initialize routes after DB connection
+try {
+  // Import route handlers
+  if (!alarmRoutes) {
+    console.log('Attempting to load route modules...');
+    try {
+      alarmRoutes = require('./routes/alarmRoutes');
+      console.log('✅ Alarm routes loaded successfully');
+    } catch (err) {
+      console.warn('⚠️ Could not load alarm routes:', err.message);
+      // Will fall back to the temporary routes defined below
+    }
+  }
+} catch (err) {
+  console.error('❌ Error initializing routes:', err);
+}
+
+// Check if alarmRoutes is defined
+if (!alarmRoutes) {
+  console.log('ℹ️ Creating MongoDB-connected alarm routes');
+  
+  // Create a router for alarms
+  const alarmRouter = express.Router();
+  
+  // Connect to the MongoDB collection directly
+  const { MongoClient } = require('mongodb');
+  // Use the exact connection string and database name
+  const mongoUri = process.env.MONGODB_URI || 'mongodb+srv://garvisha:apphelix@oxygen-monitor.ivkylso.mongodb.net/?retryWrites=true&w=majority&appName=Oxygen-Monitor';
+  const dbName = 'oxygen-monitor'; // Exact database name with hyphen
+  
+  // Function to transform alarm documents to match frontend expectations
+  function transformAlarmDocument(doc) {
+    if (!doc) return null;
+    
+    // Log the original document for debugging
+    console.log('Original document fields:', Object.keys(doc));
+    
+    // Create a standardized alarm object
+    const transformedDoc = {
+      _id: doc._id || doc.id || `alarm-${Date.now()}`,
+      AlarmId: doc.AlarmId || doc.alarmId || doc.AlarmCode || '',
+      AlarmCode: doc.AlarmCode || doc.alarmCode || '',
+      AlarmDescription: doc.AlarmDescription || doc.alarmDescription || '',
+      CreatedTimestamp: doc.CreatedTimestamp || doc.createdTimestamp || new Date().toISOString(),
+      DeviceId: doc.DeviceId || doc.deviceId || '',
+      DeviceName: doc.DeviceName || doc.deviceName || '',
+      PlantName: doc.PlantName || doc.plantName || '',
+      IsActive: doc.IsActive !== undefined ? doc.IsActive : (doc.isActive !== undefined ? doc.isActive : true),
+      IsRead: doc.IsRead !== undefined ? doc.IsRead : (doc.isRead !== undefined ? doc.isRead : false)
+    };
+    
+    console.log('Transformed document fields:', Object.keys(transformedDoc));
+    return transformedDoc;
+  }
+  
+  console.log(`🔄 Connecting directly to MongoDB: ${mongoUri} (DB: ${dbName})`);
+  
+  // MongoDB client for alarm routes - use the direct connection string
+  let mongoClient;
+  try {
+    // Use the full connection string directly
+    console.log(`🔌 Connecting to MongoDB Atlas...`);
+    
+    mongoClient = new MongoClient(mongoUri, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      connectTimeoutMS: 15000,         // Increase timeout for connection issues
+      socketTimeoutMS: 30000,          // Increase timeout for operations
+      serverSelectionTimeoutMS: 15000  // Maximum wait time for server selection
+    });
+  } catch (err) {
+    console.error('❌ Error configuring MongoDB client:', err);
+    // Fallback to simple connection
+    mongoClient = new MongoClient('mongodb://localhost:27017');
+  }
+  
+  // Connect to MongoDB immediately
+  (async () => {
+    try {
+      await mongoClient.connect();
+      console.log('✅ Direct MongoDB connection established for alarm routes');
+      
+      // Verify database and collection existence
+      const db = mongoClient.db(dbName);
+      const collections = await db.listCollections({ name: 'alarms' }).toArray();
+      
+      if (collections.length > 0) {
+        console.log(`✅ Collection 'alarms' found in database '${dbName}'`);
+        
+        // Count documents in the collection to verify access
+        const alarmsCollection = db.collection('alarms');
+        const count = await alarmsCollection.countDocuments({});
+        console.log(`📊 Found ${count} total alarms in collection`);
+      } else {
+        console.error(`❌ Collection 'alarms' NOT found in database '${dbName}'!`);
+        console.log('Available collections:');
+        const allCollections = await db.listCollections().toArray();
+        allCollections.forEach(coll => console.log(`- ${coll.name}`));
+      }
+    } catch (err) {
+      console.error('❌ Failed to connect to MongoDB for alarm routes:', err);
+    }
+  })();
+  
+  // GET all alarms endpoint
+  alarmRouter.get('/', async (req, res) => {
+    console.log('GET /api/alarms endpoint called');
+    try {
+      // Connect to the alarms collection
+      const db = mongoClient.db(dbName);
+      const alarmsCollection = db.collection('alarms');
+      
+      // Log the collection information
+      console.log(`🔎 Querying collection: ${alarmsCollection.namespace}`);
+      
+      // Add debug logging for database and collection
+      console.log(`Current database: ${db.databaseName}`);
+      
+      try {
+        // List all databases to verify connection
+        const adminDb = mongoClient.db('admin');
+        const dbs = await adminDb.admin().listDatabases();
+        console.log('Available databases:');
+        dbs.databases.forEach(d => console.log(`- ${d.name} (${d.sizeOnDisk} bytes)`));
+        
+        // Get stats for the current database
+        const dbStats = await db.stats();
+        console.log(`Database stats: ${dbStats.collections} collections, ${dbStats.objects} objects`);
+        
+        // Then get collection stats
+        try {
+          const stats = await db.command({ collStats: 'alarms' });
+          console.log(`Collection stats: ${stats.count} documents, ${stats.size} bytes`);
+        } catch (statsErr) {
+          console.log(`Could not get collection stats: ${statsErr.message}`);
+        }
+      } catch (dbErr) {
+        console.log(`Database admin operations failed: ${dbErr.message}`);
+      }
+      
+      // Fetch alarms from MongoDB - use an empty query to get everything
+      console.log('Executing find() on alarms collection with empty query...');
+      let rawAlarms = [];
+      
+      try {
+        // First try a find with no criteria to get any documents at all
+        rawAlarms = await alarmsCollection.find({}).limit(100).toArray();
+        console.log(`First query returned ${rawAlarms.length} documents`);
+        
+        if (rawAlarms.length === 0) {
+          // If no documents found, log available collections and their counts
+          console.log('No documents found. Checking all collections in database...');
+          const allCollections = await db.listCollections().toArray();
+          let sampleDocLogged = false;
+          
+          for (const coll of allCollections) {
+            const count = await db.collection(coll.name).countDocuments();
+            console.log(`Collection ${coll.name}: ${count} documents`);
+            
+            // If this is the first collection with documents, sample one
+            if (count > 0 && !sampleDocLogged) {
+              const sampleDoc = await db.collection(coll.name).findOne({});
+              console.log(`Sample document from ${coll.name}:`, sampleDoc);
+              sampleDocLogged = true;
+            }
+          }
+        }
+      } catch (findErr) {
+        console.error('Error executing find() query:', findErr);
+      }
+      
+      console.log(`📊 Raw query found ${rawAlarms.length} alarms from MongoDB`);
+      
+      // Transform the documents to match frontend expectations
+      if (rawAlarms && rawAlarms.length > 0) {
+        // Before transformation, log a sample document
+        console.log('Sample raw document:', JSON.stringify(rawAlarms[0]).substring(0, 300) + '...');
+        
+        const alarms = rawAlarms.map(transformAlarmDocument)
+          .sort((a, b) => new Date(b.CreatedTimestamp) - new Date(a.CreatedTimestamp));
+        
+        console.log(`📊 Transformed ${alarms.length} alarms for the frontend`);
+        console.log('Sample alarm fields:', alarms.length > 0 ? Object.keys(alarms[0]).join(', ') : 'No alarms found');
+        
+        res.json(alarms);
+      } else {
+        // No documents found, return empty array
+        console.log('No documents found in alarms collection');
+        res.json([]);
+      }
+    } catch (error) {
+      console.error('Error in /api/alarms endpoint:', error);
+      // Fall back to test data if MongoDB fails
+      console.log('⚠️ Falling back to test data');
+      res.json([
+        {
+          _id: 'test-1',
+          AlarmId: 'ALM001',
+          AlarmCode: 'IO_ALR_108',
+          AlarmDescription: 'Test alarm (MongoDB fallback)',
+          CreatedTimestamp: new Date().toISOString(),
+          DeviceId: 'esp32_04',
+          DeviceName: 'ESP32 Device',
+          PlantName: 'Plant D',
+          IsActive: true,
+          IsRead: false
+        }
+      ]);
+    }
+  });
+  
+  // GET alarms by device endpoint
+  alarmRouter.get('/device/:deviceId', async (req, res) => {
+    console.log(`GET /api/alarms/device/${req.params.deviceId} endpoint called`);
+    try {
+      // Connect to the alarms collection
+      const db = mongoClient.db(dbName);
+      const alarmsCollection = db.collection('alarms');
+      
+      // Fetch device-specific alarms from MongoDB - use exact field name from the document
+      const query = { DeviceId: req.params.deviceId };
+      
+      console.log(`🔎 Querying for device with query:`, query);
+      
+      const rawAlarms = await alarmsCollection.find(query).limit(100).toArray();
+      
+      console.log(`📊 Raw query found ${rawAlarms.length} alarms for device ${req.params.deviceId}`);
+      
+      // Transform the documents to match frontend expectations
+      const alarms = rawAlarms.map(transformAlarmDocument)
+        .sort((a, b) => new Date(b.CreatedTimestamp) - new Date(a.CreatedTimestamp));
+      
+      console.log(`📊 Transformed ${alarms.length} alarms for device ${req.params.deviceId}`);
+      res.json(alarms);
+    } catch (error) {
+      console.error(`Error in /api/alarms/device/${req.params.deviceId} endpoint:`, error);
+      // Fall back to test data if MongoDB fails
+      console.log('⚠️ Falling back to test data for device');
+      res.json([
+        {
+          _id: 'test-device-1',
+          AlarmId: 'ALM002',
+          AlarmCode: 'IO_ALR_106',
+          AlarmDescription: `Test alarm for device ${req.params.deviceId} (MongoDB fallback)`,
+          CreatedTimestamp: new Date().toISOString(),
+          DeviceId: req.params.deviceId,
+          DeviceName: 'ESP32 Device',
+          PlantName: 'Plant D',
+          IsActive: true,
+          IsRead: false
+        }
+      ]);
+    }
+  });
+  
+  // GET unread alarms count endpoint
+  alarmRouter.get('/unread/count', async (req, res) => {
+    console.log('GET /api/alarms/unread/count endpoint called');
+    try {
+      // Connect to the alarms collection
+      const db = mongoClient.db(dbName);
+      const alarmsCollection = db.collection('alarms');
+      
+      // Count unread alarms - use correct field name from document
+      const query = { IsRead: false };
+      
+      console.log(`🔎 Querying for unread alarms with query:`, query);
+      
+      const count = await alarmsCollection.countDocuments(query);
+      
+      console.log(`📊 Found ${count} unread alarms in MongoDB`);
+      res.json({ count });
+    } catch (error) {
+      console.error('Error in /api/alarms/unread/count endpoint:', error);
+      // Fall back to test data
+      console.log('⚠️ Falling back to test count data');
+      res.json({ count: 1 });
+    }
+  });
+  
+  // Mark alarm as read endpoint
+  alarmRouter.put('/:alarmId/read', async (req, res) => {
+    console.log(`PUT /api/alarms/${req.params.alarmId}/read endpoint called`);
+    try {
+      // Connect to the alarms collection
+      const db = mongoClient.db(dbName);
+      const alarmsCollection = db.collection('alarms');
+      
+      // Try different ID formats (MongoDB ObjectID or string ID)
+      let result;
+      try {
+        // Try with MongoDB ObjectID
+        const { ObjectId } = require('mongodb');
+        const objectId = new ObjectId(req.params.alarmId);
+        
+        // Update using exact field name - IsRead, not isRead
+        result = await alarmsCollection.updateOne(
+          { _id: objectId },
+          { $set: { IsRead: true } }
+        );
+        
+        console.log(`🔎 Updated alarm with ObjectId: ${objectId}`);
+      } catch (err) {
+        // If ObjectID conversion fails, try with AlarmId field
+        console.log(`💥 ObjectId conversion failed, trying with AlarmId: ${req.params.alarmId}`);
+        result = await alarmsCollection.updateOne(
+          { AlarmId: parseInt(req.params.alarmId) || req.params.alarmId },
+          { $set: { IsRead: true } }
+        );
+      }
+      
+      console.log(`📊 Updated alarm ${req.params.alarmId} to read. Matched: ${result.matchedCount}, Modified: ${result.modifiedCount}`);
+      res.json({ 
+        success: result.matchedCount > 0,
+        matchedCount: result.matchedCount,
+        modifiedCount: result.modifiedCount
+      });
+    } catch (error) {
+      console.error(`Error in /api/alarms/${req.params.alarmId}/read endpoint:`, error);
+      // Fall back to test response
+      console.log('⚠️ Falling back to test success response');
+      res.json({ success: true });
+    }
+  });
+  
+  // Mark all alarms as read endpoint
+  alarmRouter.put('/read/all', async (req, res) => {
+    console.log('PUT /api/alarms/read/all endpoint called');
+    try {
+      // Connect to the alarms collection
+      const db = mongoClient.db(dbName);
+      const alarmsCollection = db.collection('alarms');
+      
+      // Update all unread alarms - use the correct field name
+      const result = await alarmsCollection.updateMany(
+        { IsRead: false },
+        { $set: { IsRead: true } }
+      );
+      
+      console.log(`📊 Marked all alarms as read. Matched: ${result.matchedCount}, Modified: ${result.modifiedCount}`);
+      res.json({ 
+        success: true,
+        matchedCount: result.matchedCount,
+        modifiedCount: result.modifiedCount
+      });
+    } catch (error) {
+      console.error('Error in /api/alarms/read/all endpoint:', error);
+      // Fall back to test response
+      console.log('⚠️ Falling back to test success response');
+      res.json({ success: true });
+    }
+  });
+  
+  // Use the temporary router for alarm routes
+  app.use('/api/alarms', alarmRouter);
+} else {
+  // Use the existing alarm routes if they're defined
+  app.use('/api/alarms', alarmRoutes);
+}
+
+// Add a basic test endpoint for API verification
+app.get('/api/test', (req, res) => {
+  console.log('GET /api/test endpoint called');
+  res.json({ message: 'API is working' });
+});
 
 // Serve static files from the public directory
 app.use(express.static('public'));

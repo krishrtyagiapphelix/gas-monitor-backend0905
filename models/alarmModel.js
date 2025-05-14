@@ -1,17 +1,19 @@
 const mongoose = require('mongoose');
 const { getTelemetryDB } = require('../config/db');
 
-// Define the schema
+// Define the schema - updated to match the actual MongoDB document structure
+// Making fields optional to avoid validation errors with existing data
 const alarmSchema = new mongoose.Schema({
-  SqlId: Number,
-  AlarmId: { type: Number, required: true },
-  DeviceId: { type: Number, required: true },
+  _id: { type: mongoose.Schema.Types.ObjectId, auto: true },
+  SqlId: { type: Number, required: false },
+  AlarmId: { type: Number, required: false },  // Making it optional as it might be missing in some records
+  DeviceId: { type: Number, required: false },  // Making it optional as it might be missing in some records
   AlarmValue: String,
   CreatedBy: Number,
   IsActive: { type: Boolean, default: true },
   CreatedTimestamp: { type: Date, default: Date.now },
-  TelemetryKeyId: Number,
-  AlarmRootCauseId: Number,
+  TelemetryKeyId: { type: mongoose.Schema.Types.Mixed, required: false },
+  AlarmRootCauseId: { type: mongoose.Schema.Types.Mixed, required: false },
   UpdatedBy: Number,
   UpdatedTimestamp: { type: Date, default: Date.now },
   AlarmCode: String,
@@ -19,8 +21,17 @@ const alarmSchema = new mongoose.Schema({
   DeviceName: String,
   IsRead: { type: Boolean, default: false },
   PlantName: String,
-  DeviceData: String
+  DeviceData: { type: mongoose.Schema.Types.Mixed, required: false } // Could be String or Object
+}, {
+  // This is important - tells Mongoose not to enforce strict schema validation
+  // which allows for fields in the DB that aren't in the schema
+  strict: false,
+  // This tells Mongoose not to add __v version key
+  versionKey: false
 });
+
+// Log that we're initializing the Alarm model
+console.log('📋 Initializing Alarm model to access MongoDB collection');
 
 // Create a model using the telemetry database connection (oxygen_monitor)
 const getTelemetryModel = () => {
@@ -28,18 +39,24 @@ const getTelemetryModel = () => {
   
   // If connection isn't ready yet, return a dummy model that will be updated
   if (!telemetryDB) {
-    console.warn('u26a0ufe0f Telemetry DB connection not yet available - returning placeholder alarm model');
+    console.warn('⚠️ Telemetry DB connection not yet available - returning placeholder alarm model');
     return mongoose.model('Alarm', alarmSchema);
   }
   
   // Use the telemetry DB connection to create the model
   try {
-    // Check if model already exists to avoid duplicate model error
-    return telemetryDB.model('Alarm');
+    console.log('🔍 Attempting to connect to alarms collection in oxygen_monitor database');
+    // Match the actual collection name in MongoDB
+    // Note: Collection names are case-sensitive in MongoDB
+    return telemetryDB.model('Alarm', alarmSchema, 'alarms');
   } catch (error) {
-    // Model doesn't exist yet, create it
+    console.error('❌ Error creating Alarm model:', error);
+    // Try one more time with explicit collection name
     return telemetryDB.model('Alarm', alarmSchema, 'alarms');
   }
 };
 
-module.exports = getTelemetryModel();
+const alarmModel = getTelemetryModel();
+console.log('✅ Alarm model initialized');
+
+module.exports = alarmModel;
