@@ -9,6 +9,7 @@ const {
   getLatestTelemetryByDeviceName,
   getDiagnosticData
 } = require("../services/mongoTelemetryService");
+const stateService = require('../services/stateService');
 
 // Create a threshold model and collection
 const thresholdSchema = new mongoose.Schema({
@@ -502,6 +503,108 @@ router.post("/tolerance/:deviceId/:type", async (req, res) => {
   } catch (error) {
     console.error(`❌ Error updating tolerance:`, error);
     res.status(500).json({ error: "Failed to update tolerance value" });
+  }
+});
+
+// 🔄 **Complete Device State Route** - Returns the complete device state with parameter timestamps
+router.get("/state/:deviceId", async (req, res) => {
+  try {
+    const deviceId = req.params.deviceId;
+    console.log(`🔄 Fetching complete device state for: ${deviceId}`);
+    
+    // Get state from cache
+    const deviceState = stateService.getDeviceState(deviceId);
+    
+    if (deviceState) {
+      console.log(`✅ Found cached state for device: ${deviceId}`);
+      return res.status(200).json({
+        success: true,
+        data: deviceState,
+        source: 'state_cache'
+      });
+    }
+    
+    // If no state in cache, try to find device in database
+    const isObjectId = mongoose.Types.ObjectId.isValid(deviceId);
+    
+    if (isObjectId) {
+      // Try to find device by MongoDB ID
+      const device = await Device.findById(deviceId);
+      
+      if (device) {
+        console.log(`🔍 Found device by ID: ${device.deviceName}`);
+        
+        // Load latest telemetry and create an initial state
+        const telemetryService = require('../services/mongoTelemetryService');
+        const latestTelemetry = await telemetryService.getLatestTelemetryForDevice(deviceId);
+        
+        if (latestTelemetry) {
+          // Create initial state
+          const initialState = {
+            deviceId: deviceId,
+            deviceName: device.deviceName,
+            ...latestTelemetry
+          };
+          
+          // Store in cache
+          const state = stateService.updateDeviceState(deviceId, initialState, false);
+          
+          return res.status(200).json({
+            success: true,
+            data: state,
+            source: 'database'
+          });
+        }
+      }
+    }
+    
+    // Try to find by device name
+    const device = await Device.findOne({ 
+      $or: [
+        { deviceName: deviceId },
+        { deviceId: deviceId }
+      ]
+    });
+    
+    if (device) {
+      console.log(`🔍 Found device by name: ${device.deviceName}`);
+      
+      // Load latest telemetry
+      const telemetryService = require('../services/mongoTelemetryService');
+      const latestTelemetry = await telemetryService.getLatestTelemetryForDevice(device._id);
+      
+      if (latestTelemetry) {
+        // Create initial state
+        const initialState = {
+          deviceId: device._id,
+          deviceName: device.deviceName,
+          ...latestTelemetry
+        };
+        
+        // Store in cache
+        const state = stateService.updateDeviceState(device._id, initialState, false);
+        
+        return res.status(200).json({
+          success: true,
+          data: state,
+          source: 'database'
+        });
+      }
+    }
+    
+    // No data found
+    return res.status(404).json({
+      success: false,
+      message: `No state data found for device: ${deviceId}`
+    });
+    
+  } catch (error) {
+    console.error(`❌ Error fetching device state: ${error.message}`);
+    return res.status(500).json({
+      success: false,
+      message: "Error fetching device state",
+      error: error.message
+    });
   }
 });
 

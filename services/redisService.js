@@ -8,9 +8,10 @@ const { redisClient } = require('../server');
 /**
  * Publish telemetry data to Redis channel
  * @param {Object} telemetryData - Telemetry data to publish
+ * @param {boolean} isPartialUpdate - Whether this is a partial update (default: true)
  * @returns {Promise<void>}
  */
-const publishTelemetryData = async (telemetryData) => {
+const publishTelemetryData = async (telemetryData, isPartialUpdate = true) => {
   try {
     // Ensure we have a connected Redis client
     if (!redisClient || !redisClient.isOpen) {
@@ -28,12 +29,23 @@ const publishTelemetryData = async (telemetryData) => {
       timestamp: telemetryData.timestamp || telemetryData.Timestamp || new Date(),
       plantName: telemetryData.plantName || 
                 (telemetryData.deviceName?.includes('esp32_04') || 
-                 telemetryData.device?.includes('esp32_04') ? 'Plant D' : 'Plant C')
+                 telemetryData.device?.includes('esp32_04') ? 'Plant D' : 'Plant C'),
+      // Add metadata for state management
+      _partialUpdate: isPartialUpdate,
+      _updatedParameters: Object.keys(telemetryData).filter(key => 
+        !key.startsWith('_') && 
+        key !== 'deviceId' && 
+        key !== 'DeviceId' && 
+        key !== 'deviceName' && 
+        key !== 'DeviceName' &&
+        telemetryData[key] !== null && 
+        telemetryData[key] !== undefined
+      )
     };
 
     // Publish to Redis telemetry channel
     await redisClient.publish('telemetry', JSON.stringify(normalizedData));
-    console.log(`📡 Published telemetry data to Redis for device: ${normalizedData.deviceName || normalizedData.deviceId}`);
+    console.log(`📡 Published ${isPartialUpdate ? 'partial' : 'complete'} telemetry data to Redis for device: ${normalizedData.deviceName || normalizedData.deviceId}`);
     
     return true;
   } catch (error) {

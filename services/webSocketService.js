@@ -5,6 +5,7 @@
 
 const { io } = require('../server');
 const { getTelemetryDB } = require('../config/db');
+const stateService = require('./stateService');
 
 /**
  * Initialize WebSocket event handlers
@@ -54,6 +55,17 @@ const initializeWebSocketEvents = () => {
  */
 const sendLatestTelemetryToClient = async (socket, deviceId) => {
   try {
+    // First, check if we have a cached state for this device
+    const cachedState = stateService.getDeviceState(deviceId);
+    
+    if (cachedState) {
+      // Use the cached state if available
+      socket.emit('telemetry', cachedState);
+      console.log(`📡 Sent cached state to client ${socket.id} for device ${deviceId}`);
+      return;
+    }
+    
+    // If no cached state, fall back to database query
     const telemetryDB = getTelemetryDB();
     if (!telemetryDB) {
       console.error('❌ Telemetry database connection not available');
@@ -89,6 +101,9 @@ const sendLatestTelemetryToClient = async (socket, deviceId) => {
         oilLevel: latestData[0].OilLevel || latestData[0].oilLevel || 0,
         timestamp: latestData[0].Timestamp || latestData[0].timestamp || new Date()
       };
+
+      // Store this in the state cache
+      stateService.updateDeviceState(deviceId, normalizedData, false);
 
       // Send to client
       socket.emit('telemetry', normalizedData);
@@ -143,6 +158,16 @@ const sendLatestPlantDataToClient = async (socket, plantId) => {
     // Get latest telemetry for each device
     for (const deviceName of allDeviceNames) {
       if (!deviceName) continue;
+      
+      // First check if we have a cached state
+      const cachedState = stateService.getDeviceState(deviceName);
+      
+      if (cachedState) {
+        // Use the cached state if available
+        socket.emit('telemetry', cachedState);
+        console.log(`📡 Sent cached state to client ${socket.id} for device ${deviceName}`);
+        continue;
+      }
 
       const query = { 
         $or: [
@@ -169,6 +194,9 @@ const sendLatestPlantDataToClient = async (socket, plantId) => {
           plantName: plantName
         };
 
+        // Store in state cache
+        stateService.updateDeviceState(deviceName, normalizedData, false);
+
         // Send to client
         socket.emit('telemetry', normalizedData);
         console.log(`📡 Sent latest telemetry data to client ${socket.id} for device ${deviceName}`);
@@ -193,12 +221,16 @@ const broadcastTelemetryData = (telemetryData) => {
     const deviceId = telemetryData.deviceId || telemetryData.device;
     const plantId = telemetryData.plantId || 
                    (telemetryData.plantName === 'Plant D' ? '2' : '1');
+    
+    // First update the state if this is partial data
+    const isPartialUpdate = telemetryData._partialUpdate !== false;
+    const completeState = stateService.updateDeviceState(deviceId, telemetryData, isPartialUpdate);
 
     // Emit to specific device room
-    io.to(`device:${deviceId}`).emit('telemetry', telemetryData);
+    io.to(`device:${deviceId}`).emit('telemetry', completeState || telemetryData);
     
     // Also emit to plant room
-    io.to(`plant:${plantId}`).emit('telemetry', telemetryData);
+    io.to(`plant:${plantId}`).emit('telemetry', completeState || telemetryData);
     
     console.log(`📡 Broadcasted telemetry data for device ${deviceId}`);
   } catch (error) {

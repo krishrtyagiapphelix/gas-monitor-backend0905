@@ -13,6 +13,9 @@ let authRoutes, plantRoutes, deviceRoutes, telemetryRoutes, azureDeviceRoutes, a
 // Redis test routes - can be imported immediately
 const redisTestRoutes = require('./routes/redisTestRoutes');
 
+// Add state service require at the top of the file, after other requires
+const stateService = require('./services/stateService');
+
 const app = express();
 
 // Apply CORS middleware to Express app
@@ -181,54 +184,64 @@ setInterval(async () => {
         const deviceId = telemetryData.deviceId || telemetryData.device;
         const deviceName = telemetryData.deviceName || telemetryData.DeviceName || deviceId;
         
-        // Check if this is from esp32_04 - various ways to identify it
-        const isEsp32_04 = deviceId === 'esp32_04' || 
-                          deviceName?.toLowerCase().includes('esp32_04') || 
-                          telemetryData?.device?.toLowerCase() === 'esp32_04' ||
-                          telemetryData?.deviceId?.toLowerCase() === 'esp32_04';
+        // Detect if this is a partial update (if not explicitly marked, assume it is)
+        const isPartialUpdate = telemetryData._partialUpdate !== false;
         
-        // Enhanced logging for ESP32_04
-        if (isEsp32_04) {
-          console.log(`🔵 CRITICAL: Received ESP32_04 telemetry: ${JSON.stringify(telemetryData).substring(0, 200)}...`);
+        // Update the device state with the received telemetry data
+        const completeState = stateService.updateDeviceState(deviceId, telemetryData, isPartialUpdate);
+        
+        if (completeState) {
+          console.log(`🔄 Updated device state for ${deviceName} (Partial update: ${isPartialUpdate})`);
           
-          // BROADCAST ESP32_04 DATA DIRECTLY TO ALL CLIENTS in multiple ways to ensure reception
-          console.log(`💥 Broadcasting ESP32_04 data to ALL clients via MULTIPLE channels`);
+          // Check if this is from esp32_04 - various ways to identify it
+          const isEsp32_04 = deviceId === 'esp32_04' || 
+                            deviceName?.toLowerCase().includes('esp32_04') || 
+                            telemetryData?.device?.toLowerCase() === 'esp32_04' ||
+                            telemetryData?.deviceId?.toLowerCase() === 'esp32_04';
           
-          // Method 1: Direct broadcast to all sockets
-          io.emit("telemetry", telemetryData);
+          // Enhanced logging for ESP32_04
+          if (isEsp32_04) {
+            console.log(`🔵 CRITICAL: Received ESP32_04 telemetry: ${JSON.stringify(completeState).substring(0, 200)}...`);
+            
+            // BROADCAST ESP32_04 DATA DIRECTLY TO ALL CLIENTS in multiple ways to ensure reception
+            console.log(`💥 Broadcasting ESP32_04 data to ALL clients via MULTIPLE channels`);
+            
+            // Method 1: Direct broadcast to all sockets
+            io.emit("telemetry", completeState);
+            
+            // Method 2: ESP32_04 specific channel
+            io.emit("telemetry_esp32_04", completeState);
+            
+            // Method 3: Device-specific room
+            io.to(`device:esp32_04`).emit("telemetry-esp32_04", completeState);
+            
+            // Method 4: Global broadcast with type identifier
+            io.emit("broadcast", { type: "esp32_04_data", data: completeState });
+            
+            // Method 5: Send to all connected socket clients individually for maximum reliability
+            const connectedSockets = Array.from(io.sockets.sockets).map(socket => socket[1]);
+            console.log(`💿 Sending to ${connectedSockets.length} individual sockets`);
+            
+            connectedSockets.forEach(socket => {
+              socket.emit("telemetry-esp32_04", completeState);
+            });
+            
+          } else {
+            // Normal handling for other devices
+            console.log(`📡 Received telemetry data for device: ${deviceName}`);
+            
+            // Emit to specific device room
+            io.to(`device:${deviceId}`).emit("telemetry", completeState);
+          }
           
-          // Method 2: ESP32_04 specific channel
-          io.emit("telemetry_esp32_04", telemetryData);
+          // Also emit to plant room if we can determine the plant
+          const plantName = telemetryData.plantName || 
+                          (deviceName.includes("esp32_04") ? "Plant D" : "Plant C");
+          const plantId = plantName === "Plant D" ? 2 : 1; // Map plant names to IDs
           
-          // Method 3: Device-specific room
-          io.to(`device:esp32_04`).emit("telemetry-esp32_04", telemetryData);
-          
-          // Method 4: Global broadcast with type identifier
-          io.emit("broadcast", { type: "esp32_04_data", data: telemetryData });
-          
-          // Method 5: Send to all connected socket clients individually for maximum reliability
-          const connectedSockets = Array.from(io.sockets.sockets).map(socket => socket[1]);
-          console.log(`💿 Sending to ${connectedSockets.length} individual sockets`);
-          
-          connectedSockets.forEach(socket => {
-            socket.emit("telemetry-esp32_04", telemetryData);
-          });
-          
-        } else {
-          // Normal handling for other devices
-          console.log(`📡 Received telemetry data for device: ${deviceName}`);
-          
-          // Emit to specific device room
-          io.to(`device:${deviceId}`).emit("telemetry", telemetryData);
+          console.log(`Emitting to plant:${plantId} for device ${deviceName}`);
+          io.to(`plant:${plantId}`).emit("telemetry", completeState);
         }
-        
-        // Also emit to plant room if we can determine the plant
-        const plantName = telemetryData.plantName || 
-                         (deviceName.includes("esp32_04") ? "Plant D" : "Plant C");
-        const plantId = plantName === "Plant D" ? 2 : 1; // Map plant names to IDs
-        
-        console.log(`Emitting to plant:${plantId} for device ${deviceName}`);
-        io.to(`plant:${plantId}`).emit("telemetry", telemetryData);
       } catch (err) {
         console.error("❌ Error processing telemetry message:", err);
       }
